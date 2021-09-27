@@ -153,7 +153,6 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
         $parent_uuids = (array) $parent_uuid;
         $existing = $this->entityTypeManager->getStorage('node')->loadByProperties(['uuid' => $parent_uuids]);
         if (count($existing) != count($parent_uuids)) {
-
           $this->messenger->addWarning($this->t('Sorry, we can not process ADO with @uuid from Set @setid yet, there are missing parents with UUID(s) @parent_uuids. We will retry.',[
             '@uuid' => $data->info['row']['uuid'],
             '@setid' => $data->info['set_id'],
@@ -162,7 +161,6 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
           // Pushing to the end of the queue.
           $data->info['attempt']++;
           if ($data->info['attempt'] < 3) {
-            error_log('Re-enqueueing');
             \Drupal::queue('ami_ingest_ado')
               ->createItem($data);
             return;
@@ -185,11 +183,13 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
       }
     }
 
+    $processed_metadata = NULL;
+
     $method = $data->mapping->globalmapping ?? "direct";
     if ($method == 'custom') {
       $method = $data->mapping->custommapping_settings->{$data->info['row']['type']}->metadata ?? "direct";
     }
-    if ($method == "metadata") {
+    if ($method == 'template') {
       $processed_metadata = $this->AmiUtilityService->processMetadataDisplay($data);
       if (!$processed_metadata) {
         $this->messenger->addWarning($this->t('Sorry, we can not cast ADO with @uuid into proper Metadata. Check the Metadata Display Template used, your permissions and/or your data ROW in your CSV for set @setid.',[
@@ -210,6 +210,22 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
           ]));
           return;
       }
+    }
+
+    // If at this stage $processed_metadata is empty or Null there was a wrong
+    // Manual added wrong mapping or any other User input induced error
+    // We do not process further
+    // Maybe someone wants to ingest FILES only without any Metadata?
+    // Not a good use case so let's stop that non sense here.
+
+    if (empty($processed_metadata)) {
+      $message = $this->t('Sorry, ADO with @uuid is empty or has wrong data/metadata. Check your data ROW in your CSV for set @setid or your Set Configuration for manually entered JSON that may break your setup.',[
+        '@uuid' => $data->info['row']['uuid'],
+        '@setid' => $data->info['set_id']
+      ]);
+      $this->messenger->addWarning($message);
+      $this->loggerFactory->get('ami')->error($message);
+      return;
     }
 
     $cleanvalues = [];
@@ -235,14 +251,14 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
 
     // deal with possible overrides from either Direct ingest of
     // A Smart twig template that adds extra mappings
+    // This decode will always work because we already decoded and encoded again.
+    $processed_metadata = json_decode($processed_metadata, TRUE);
 
-    $processed_metadata = json_decode($processed_metadata, true);
+    $custom_file_mapping = isset($processed_metadata['entity:file']) && is_array($processed_metadata['entity:file']) ? $processed_metadata['entity:file'] : [];
+    $custom_node_mapping = isset($processed_metadata['entity:node']) && is_array($processed_metadata['entity:node']) ? $processed_metadata['entity:node'] : [];
 
-    $custom_file_mapping = $processed_metadata['entity:file'] ?? [];
-    $custom_node_mapping = $processed_metadata['entity:node'] ?? [];
-
-    $entity_mapping_structure['entity:file'] = array_unique(array_merge($custom_file_mapping,$file_columns));
-    $entity_mapping_structure['entity:node'] =  array_unique(array_merge($custom_node_mapping,$ado_columns));
+    $entity_mapping_structure['entity:file'] = array_unique(array_merge($custom_file_mapping, $file_columns));
+    $entity_mapping_structure['entity:node'] =  array_unique(array_merge($custom_node_mapping, $ado_columns));
     // Unset so we do not lose our merge after '+' both arrays
     unset($processed_metadata['entity:file']);
     unset($processed_metadata['entity:node']);
@@ -250,6 +266,8 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
     $cleanvalues['ap:entitymapping'] = $entity_mapping_structure;
     $processed_metadata  = $processed_metadata + $cleanvalues;
     // Assign parents as NODE Ids.
+    // @TODO if we decide to allow multiple parents this is a place that
+    // Needs change.
     foreach ($parent_nodes as $parent_property => $node_ids) {
       $processed_metadata[$parent_property] = $node_ids;
     }
@@ -395,8 +413,10 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
     // Fall back to not published in case no status was passed.
     $status = $data->info['status'][$bundle] ?? 0;
     // default Sortfile which will respect the ingest order. If there was already one set, preserve.
-    $processed_metadata['ap:tasks']['ap:sortfiles'] = $processed_metadata['ap:tasks']['ap:sortfiles'] ?? 'index';
-    // JSON_ENCODE AGAIN
+    $sort_files = isset($processed_metadata['ap:tasks']) && isset($processed_metadata['ap:tasks']['ap:sortfiles']) ?  $processed_metadata['ap:tasks']['ap:sortfiles'] : 'index';
+
+    $processed_metadata['ap:tasks']['ap:sortfiles'] = $sort_files;
+    // JSON_ENCODE AGAIN!
     $jsonstring = json_encode($processed_metadata, JSON_PRETTY_PRINT, 50);
 
     if ($jsonstring) {
@@ -465,8 +485,6 @@ class IngestADOQueueWorker extends QueueWorkerBase implements ContainerFactoryPl
                     $processed_metadata[$as_file_type] = $original_value[$as_file_type];
                   }
                 }
-                // Finally set the original ap task or index as default.
-                $processed_metadata['ap:tasks']['ap:sortfiles'] = $processed_metadata['ap:tasks']['ap:sortfiles'] ?? 'index';
                 $this->patchJson($original_value, $processed_metadata);
                 $itemfield->setMainValueFromArray($processed_metadata);
                 break;
