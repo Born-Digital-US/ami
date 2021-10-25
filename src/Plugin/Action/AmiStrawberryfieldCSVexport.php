@@ -319,6 +319,7 @@ class AmiStrawberryfieldCSVexport extends ConfigurableActionBase implements Depe
                 $fullvalues = array_diff_key($fullvalues, array_flip(StrawberryfieldJsonHelper::AS_FILE_TYPE));
               }
             }
+            \Drupal::moduleHandler()->alter('vbo_sbf_csv_export', $fullvalues);
             foreach($fullvalues as $key => $fullvalue) {
               $row[$key] = is_array($fullvalue) ? json_encode($fullvalue, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_HEX_QUOT ,512) : $fullvalue;
             }
@@ -399,6 +400,43 @@ class AmiStrawberryfieldCSVexport extends ConfigurableActionBase implements Depe
   }
 
   public function buildConfigurationForm(array $form, FormStateInterface $form_state) {
+
+    $twig = NULL;
+    if (!empty($this->configuration['process_json_twig_template'])) {
+      $twig = $this->entityTypeManager
+        ->getStorage('metadatadisplay_entity')
+        ->load($this->configuration['process_json_twig_template']);
+    }
+
+    $form['process_json'] = [
+      '#title' => $this->t('Process Strawberryfield JSON.'),
+      '#description' => $this->t('When checked a new AMI set with the exported data will be created and configured for "Updating" existing ADOs.'),
+      '#type' => 'select',
+      '#options' => [
+        'twig' => t('Use metadata twig template'),
+        'embed_json' => t('Embed JSON'),
+      ],
+      '#default_value' => $this->configuration['process_json'] ?? 'embed_json',
+      '#attributes' => [
+        'data-formatter-selector' => 'process_json',
+      ],
+    ];
+    $form['process_json_twig_template'] = [
+      '#type' => 'entity_autocomplete',
+      '#title' => $this->t('Choose your metadata template (Start typing! Autocomplete.)'),
+      '#target_type' => 'metadatadisplay_entity',
+      '#description' => 'Metadata template name',
+      '#selection_handler' => 'default:metadatadisplay',
+      '#validate_reference' => TRUE,
+      '#required' => TRUE,
+      '#default_value' => $twig,
+      '#states' => [
+        'visible' => [
+          ':input[data-formatter-selector="process_json"]' => ['value' => 'twig'],
+        ],
+      ],
+    ];
+
     $form['expand_nodes_to_uuids'] = [
       '#type' => 'checkbox',
       '#title' => $this->t('Expand related ADOs to UUIDs'),
